@@ -1,0 +1,548 @@
+================================================================================
+        UVM TESTBENCH ARCHITECTURE FOR SINGLE-CYCLE RV32I RISC-V PROCESSOR
+================================================================================
+
+1. OVERVIEW
+================================================================================
+This testbench implements a complete UVM (Universal Verification Methodology) 
+verification environment for a single-cycle 32-bit RISC-V processor. The 
+architecture consists of passive monitoring agents, multiple monitors capturing 
+different aspects of CPU execution, and a sophisticated scoreboard that verifies 
+correctness through:
+  - Golden memory mirroring (instruction memory, data memory, register file)
+  - Control signal verification
+  - ALU operation validation
+  - Data flow integrity checks
+
+
+2. TOP-LEVEL HIERARCHY
+================================================================================
+
+top.sv (Testbench Module)
+├─ Instantiates DUT (top_cpu.v)
+├─ Creates interfaces: imem_intf, dmem_intf, debug_if
+├─ Manages clock and reset signals
+├─ Passes virtual interfaces to UVM via config_db
+└─ Runs UVM test framework
+
+my_test.sv (UVM Test Class)
+├─ Inherits from uvm_test
+├─ Fetches virtual interfaces from config_db
+├─ Creates and configures my_env
+└─ Redistributes interfaces to environment
+
+my_env.sv (UVM Environment)
+├─ Contains verification components:
+│  ├─ imem_agent (instruction memory agent)
+│  ├─ dmem_agent (data memory agent)
+│  ├─ alu_monitor (ALU operation monitor)
+│  ├─ pc_monitor (program counter monitor)
+│  ├─ control_monitor (control signal monitor)
+│  ├─ reg_file_monitor (register file monitor)
+│  ├─ imm_monitor (immediate value monitor)
+│  └─ my_scoreboard (verification logic)
+├─ Connects all monitors' analysis ports to scoreboard in connect_phase()
+└─ Manages all component hierarchies
+
+
+3. INTERFACE DEFINITIONS
+================================================================================
+
+A. IMEM Interface (interface_imem.sv)
+   Purpose: Passive monitoring of instruction memory reads
+   Signals:
+   - instruction [31:0]: Instruction fetched from memory
+   - read_address [31:0]: Address of instruction being fetched
+   
+   Clocking block direction: INPUT (read-only for monitor)
+
+B. DMEM Interface (interface_dmem.sv)
+   Purpose: Passive monitoring of data memory operations
+   Signals:
+   - address [31:0]: Memory address
+   - write_data [31:0]: Data to write
+   - mem_data_out [31:0]: Data read from memory
+   - mem_read: Read enable signal
+   - mem_write: Write enable signal
+   
+   Clocking block direction: INPUT (read-only for monitor)
+
+C. Debug Interface (debug_if.sv)
+   Purpose: Comprehensive CPU state monitoring for verification
+   Signals organized by function:
+   
+   ALU Signals:
+   - a, b [31:0]: ALU operands
+   - alu_ctrl [3:0]: ALU control (operation select)
+   - result [31:0]: ALU output
+   - less_signed, less_unsigned, zero: ALU flags
+   
+   ALU Control Decode:
+   - funct3 [2:0]: Function field from instruction
+   - funct7b5: Bit 30 of instruction (operation modifier)
+   
+   Controller Signals:
+   - opcode [6:0]: Instruction opcode
+   - alu_src, branch, mem_read, mem_to_reg, mem_write, reg_write: Control bits
+   - aluop [1:0]: ALU operation selection
+   
+   Program Counter:
+   - PC_in, PC_out [31:0]: PC input and output
+   
+   Register File:
+   - rd, rs1, rs2 [4:0]: Register addresses
+   - write_data, read_data1, read_data2 [31:0]: Register data
+   
+   Immediate Generator:
+   - imm [31:0]: Sign-extended immediate value
+   - instruction [31:0]: Current instruction
+   
+   Modport: monitor (all signals INPUT, read-only)
+
+
+4. MONITORING AGENTS
+================================================================================
+
+A. IMEM Agent (imem_agent.sv)
+   - Passive monitoring of instruction memory
+   - NO sequencer (passive-only)
+   - Monitor (imem_monitor.sv):
+     * Samples instruction and read_address on posedge clk
+     * Captures into instruction_seq_item transaction
+     * Writes transaction to analysis port every cycle
+
+B. DMEM Agent (dmem_agent.sv)
+   - Passive monitoring of data memory
+   - NO sequencer (passive-only)
+   - Monitor (dmem_monitor.sv):
+     * Samples address, write_data, mem_data_out, mem_read, mem_write
+     * Captures into data_seq_item transaction
+     * Writes transaction to analysis port every cycle
+
+
+5. STANDALONE MONITORS
+================================================================================
+These monitors are instantiated directly in the environment (not within agents).
+
+A. PC Monitor (pc_monitor.sv)
+   Transaction Type: pc_seq_item
+   Captures: PC_in, PC_out
+   Purpose: Track program counter updates
+   Action: Updates mirror, logs PC changes
+   
+   Key Verification: Ensures PC increments correctly (PC+4) or branches properly
+
+B. ALU Monitor (alu_monitor.sv)
+   Transaction Type: alu_seq_item (enhanced)
+   Captures: a, b, alu_ctrl, result, zero, less_signed, less_unsigned
+   Also Captures: opcode, funct3, funct7b5 (for decoding)
+   Purpose: Monitor all arithmetic/logic operations
+   Action: Validates ALU control signal correctness
+   
+   Key Verification: 
+   - Correct ALU operation selected for instruction type
+   - Correct operands used
+   - Result correctly computed
+
+C. Control Monitor (control_monitor.sv)
+   Transaction Type: control_seq_item
+   Captures: opcode, alu_src, branch, mem_read, mem_to_reg, mem_write, 
+             reg_write, aluop
+   Purpose: Verify control signal generation
+   Action: Checks control signals match instruction requirements
+   
+   Key Verification:
+   - LOAD: mem_read=1, mem_to_reg=1, reg_write=1, aluop=00
+   - STORE: mem_write=1, reg_write=0, aluop=00
+   - R-type: reg_write=1, aluop=10
+   - I-type: reg_write=1, aluop=11
+   - BRANCH: branch=1, aluop=01
+
+D. Register File Monitor (reg_file_monitor.sv)
+   Transaction Type: reg_file_seq_item
+   Captures: rd, rs1, rs2, reg_write, write_data, read_data1, read_data2
+   Purpose: Monitor register file access patterns
+   Action: Verify reads/writes against mirror register state
+   
+   Key Verification:
+   - Read data matches mirror register values
+   - Writes correctly update mirror
+   - x0 register remains zero (read-only)
+
+E. Immediate Generator Monitor (imm_monitor.sv)
+   Transaction Type: imm_seq_item
+   Captures: instruction, imm (immediate value)
+   Purpose: Verify immediate extraction and sign-extension
+   Action: Decodes instruction type and validates immediate format
+   
+   Key Verification:
+   - I-type immediate: bits[31:20] sign-extended
+   - S-type immediate: bits[31:25] and bits[11:7] sign-extended
+   - B-type immediate: bits[31], [7], [30:25], [11:8], 0 reassembled
+   - U-type immediate: bits[31:12] shifted left 12 bits
+   - J-type immediate: bits[31], [19:12], [20], [30:21], 0 reassembled
+
+
+6. SCOREBOARD (my_scoreboard.sv)
+================================================================================
+
+The scoreboard is the heart of verification. It receives transactions from all
+monitors and performs functional verification.
+
+A. ANALYSIS PORTS (receive transactions)
+   - pc_imp: pc_seq_item transactions
+   - alu_imp: alu_seq_item transactions
+   - ctrl_imp: control_seq_item transactions
+   - regfile_imp: reg_file_seq_item transactions
+   - data_imp: data_seq_item transactions
+   - instr_imp: instruction_seq_item transactions
+   - imm_imp: imm_seq_item transactions
+
+B. GOLDEN MEMORIES (ground truth for verification)
+   - golden_instr_mem[0:63]: Preloaded from imem.mem
+   - golden_data_mem[0:63]: Preloaded from dmem.mem
+   - mirror_regs[0:31]: Preloaded from regfile.mem
+   
+   These are updated by the scoreboard to track expected state.
+
+C. VERIFICATION FUNCTIONS
+
+   1. write_pc(pc_seq_item t)
+      - Logs PC updates
+      - Stores transaction in pc_q for analysis
+      
+   2. write_alu(alu_seq_item t)
+      - Calls check_alu_control(t) to verify ALU control signal
+      - Logs ALU operation (operands and result)
+      - Stores transaction in alu_q
+      
+   3. write_control(control_seq_item t)
+      - Calls check_controller(t) to verify control signal correctness
+      - Logs control signal state (branch, mem_read, mem_write, etc.)
+      - Stores transaction in ctrl_q
+      
+   4. write_reg_file(reg_file_seq_item t)
+      - On READ: Compares read_data1/read_data2 against mirror_regs
+        * Error if mismatch detected
+      - On WRITE: Updates mirror_regs[rd] with write_data
+        * Maintains synchronized mirror state
+      - Logs register activity with register names (x0..x31)
+      - Stores transaction in regfile_q
+      
+   5. write_data(data_seq_item t)
+      - On WRITE: Updates golden_data_mem[address] with write_data
+      - On READ: Compares mem_data_out against golden_data_mem
+        * Error if mismatch detected
+      - Logs memory operations (address, read/write, data)
+      - Stores transaction in data_q
+      
+   6. write_instruction(instruction_seq_item t)
+      - Compares fetched instruction against golden_instr_mem
+        * Error if mismatch
+      - Decodes instruction (extracts opcode, funct3, funct7b5, rs1, rs2, rd)
+      - Triggers coverage sampling (cpu_cg.sample())
+      - Detects DEADBEEF sentinel to end test
+      - Stores transaction in instr_q
+      
+   7. write_imm(imm_seq_item t)
+      - Logs immediate values
+      - Stores transaction in imm_q
+
+D. VERIFICATION CHECKS
+
+   1. check_controller(control_seq_item c)
+      Purpose: Verify control signals match instruction opcode
+      
+      For each instruction type:
+      - LOAD (0000011):
+        * mem_read=1, mem_to_reg=1, reg_write=1, aluop=00
+      - STORE (0100011):
+        * mem_write=1, reg_write=0, aluop=00
+      - R-type (0110011):
+        * reg_write=1, aluop=10
+      - I-type (0010011):
+        * reg_write=1, aluop=11
+      - BRANCH (1100011):
+        * branch=1, aluop=01
+      
+      Uses: c.opcode (from control transaction, not global state)
+      Errors: Prints UVM_ERROR if any check fails
+      
+   2. check_alu_control(alu_seq_item t)
+      Purpose: Verify ALU control signal matches instruction
+      
+      For each instruction type, calculates expected alu_ctrl:
+      - LOAD/STORE: alu_ctrl=0000 (ADD for address calculation)
+      - BRANCH: alu_ctrl=0001 (SUB for comparison)
+      - R-type ADD/SUB: alu_ctrl based on funct3[2:0] and funct7b5
+      - I-type arithmetic: alu_ctrl based on funct3[2:0] and funct7b5
+      
+      Uses: t.opcode, t.funct3, t.funct7b5 (from same transaction)
+      Errors: Prints UVM_ERROR if t.alu_ctrl != expected
+      
+      Key Improvement: Uses transaction-local opcode/funct fields to avoid
+      synchronization errors when instruction stream doesn't align with ALU
+      operation timing.
+
+E. COVERAGE COLLECTION
+
+   cpu_cg covergroup:
+   - cp_opcode: Bins for LOAD, STORE, ITYPE, RTYPE, BRANCH
+   - cp_alu_ctrl: Bins for ADD, SUB, AND, OR, XOR, SLT, SLTU, SLL, SRL, SRA
+   - cp_mem_addr: Memory address coverage
+   - cp_instr_addr: Instruction fetch address coverage
+   - cross_opcode_alu: Cross coverage between instruction type and ALU op
+   
+   Sampled: Once per fetched instruction in write_instruction()
+
+F. SYNCHRONIZATION STRATEGY (CRITICAL)
+
+   Problem: Monitors sample signals at different times/hierarchies, causing
+   instruction/opcode mismatches when checking ALU control or verifying results.
+   
+   Solution: 
+   - alu_seq_item CARRIES opcode, funct3, funct7b5 (sampled at same cycle)
+   - check_alu_control() uses t.opcode instead of global opcode
+   - check_controller() uses c.opcode instead of global opcode
+   - Register mirror updated on every write, checked on every read
+   - This ensures verification against the SAME transaction, not stale state
+
+G. TEST COMPLETION
+
+   Sentinel Mechanism:
+   - Program ends when instruction 0xDEADBEEF is fetched
+   - write_instruction() detects this and triggers done_ev
+   - run_phase waits on: wait(instr_q.size() >= 64) OR done_ev.wait_trigger()
+   - Stops simulation when either condition is met
+
+
+7. TRANSACTION TYPES AND FLOW
+================================================================================
+
+A. pc_seq_item (from pc_monitor)
+   Logic: PC_in, PC_out
+   
+B. alu_seq_item (from alu_monitor)
+   Logic: a, b, alu_ctrl, result, zero, less_signed, less_unsigned
+   Added: opcode, funct3, funct7b5 (for synchronized verification)
+   
+C. control_seq_item (from control_monitor)
+   Logic: opcode, alu_src, branch, mem_read, mem_to_reg, mem_write, 
+          reg_write, aluop
+   
+D. reg_file_seq_item (from reg_file_monitor)
+   Logic: rd, rs1, rs2, reg_write, write_data, read_data1, read_data2
+   
+E. data_seq_item (from dmem_agent monitor)
+   Logic: address, write_data, mem_data_out, mem_read, mem_write
+   
+F. instruction_seq_item (from imem_agent monitor)
+   Logic: instruction, read_address
+   
+G. imm_seq_item (from imm_monitor)
+   Logic: instruction, imm
+
+
+8. EXECUTION FLOW
+================================================================================
+
+Cycle-by-cycle flow:
+
+1. Clock edge (posedge clk):
+   
+2. All monitors sample their signals:
+   - imem_monitor samples (instruction, read_address)
+   - dmem_monitor samples (address, write_data, mem_data_out, mem_read, mem_write)
+   - pc_monitor samples (PC_in, PC_out)
+   - alu_monitor samples (a, b, alu_ctrl, result, + opcode, funct3, funct7b5)
+   - control_monitor samples (opcode, branch, mem_read, mem_write, reg_write, aluop)
+   - reg_file_monitor samples (rd, rs1, rs2, reg_write, write_data, read_data1, read_data2)
+   - imm_monitor samples (instruction, imm)
+
+3. Transactions written to analysis ports:
+   - Each monitor's ap.write(transaction) immediately sends to scoreboard
+   
+4. Scoreboard receives and processes:
+   - write_instruction(): Verifies IMEM, decodes instruction, samples coverage
+   - write_alu(): Verifies ALU control signal
+   - write_control(): Verifies control signal correctness
+   - write_data(): Verifies/updates DMEM mirror
+   - write_reg_file(): Verifies/updates register mirror
+   - write_pc(): Logs PC updates
+   - write_imm(): Logs immediate values
+   
+5. Verification results:
+   - UVM_INFO messages: Transaction details (expected for passing)
+   - UVM_ERROR messages: Mismatches or incorrect signals (failures)
+   
+6. Test termination:
+   - If 64+ instructions sampled: Test stops
+   - If DEADBEEF sentinel detected: Test stops immediately
+   - Otherwise: Continues sampling
+
+
+9. MEMORY FILES
+================================================================================
+
+A. imem.mem (Instruction Memory Initial State)
+   Format: 64 lines, each line is one 32-bit instruction (hex)
+   Address [7:2] selects which instruction (16 instructions per line)
+   First instruction at address 0x000, last at 0x0FC
+   Line 64 contains sentinel 0xDEADBEEF
+
+B. dmem.mem (Data Memory Initial State)
+   Format: 64 lines, each line is one 32-bit data word (hex)
+   Used by LW/SW instructions for data operations
+   Preloaded with random test data
+
+C. regfile.mem (Register File Initial State)
+   Format: 32 lines, each line is one 32-bit register value (hex)
+   Register x0 always remains 0 (read-only)
+   Other registers preloaded with test values
+
+
+10. KEY VERIFICATION STRATEGIES
+================================================================================
+
+1. GOLDEN MEMORY MIRRORING
+   - Maintain copies of instruction, data, and register memories
+   - On every fetch/read/write, verify against mirror
+   - Update mirror with actual writes to keep in sync
+
+2. CONTROL SIGNAL VALIDATION
+   - Look up correct control signals for each instruction opcode
+   - Verify controller output matches expected for that opcode
+   - Errors indicate control logic bug
+
+3. ALU OPERATION VERIFICATION
+   - Decode instruction (funct3, funct7b5, opcode) to determine expected op
+   - Verify alu_ctrl signal matches expected operation
+   - Synchronization: Carry opcode in transaction to avoid timing mismatches
+
+4. DATA FLOW INTEGRITY
+   - Track register reads/writes to ensure correct data
+   - Register mirror catches stalls or incorrect register selection
+   - Data memory mirror catches address or data errors
+
+5. COVERAGE DRIVEN VERIFICATION
+   - Track instruction types and ALU operations executed
+   - Cross coverage between instruction type and ALU function
+   - Identifies missing test scenarios
+
+6. SENTINEL-BASED TEST TERMINATION
+   - Programs end by fetching 0xDEADBEEF
+   - Allows natural test completion without artificial cycles
+   - Simplifies test stimulus generation
+
+
+11. ERROR TYPES AND DETECTION
+================================================================================
+
+A. Instruction Fetch Errors
+   Error: Fetched instruction != golden_instr_mem[address]
+   Cause: IMEM corruption or wrong address calculation
+   Message: [IMEM] Instruction mismatch
+
+B. Data Memory Errors
+   Error: Read data != golden_data_mem[address]
+   Cause: DMEM write failed, address error, or data mismatch
+   Message: [DMEM] Memory mismatch at addr X: expected=Y got=Z
+
+C. Register File Errors
+   Error: Read data != mirror_regs[address]
+   Cause: Register write failed, wrong register selected, or data error
+   Message: [REGFILE] RS1/RS2 mismatch at xN: expected=Y got=Z
+
+D. Control Signal Errors
+   Error: Control bits don't match instruction requirements
+   Cause: Controller logic has bug for this instruction type
+   Message: [CTRL] LOAD/STORE/BRANCH/I/R aluop!=XX
+
+E. ALU Control Errors
+   Error: alu_ctrl != expected for instruction+funct fields
+   Cause: ALU control decoder has bug
+   Message: [ALUCTRL] Expected X got Y
+
+
+12. DESIGN ASSUMPTIONS
+================================================================================
+
+1. Single-Cycle Execution:
+   - All operations (fetch, decode, execute, memory) complete in one cycle
+   - No pipelining or hazard logic required
+
+2. Synchronous Design:
+   - All state updates occur on posedge clk
+   - Reset is negedge rst_n (active low)
+   - Combinational reads (registers, memories) available same cycle
+
+3. Instruction Format:
+   - Standard RV32I encoding (7-bit opcode, funct3[14:12], funct7[31:25])
+   - 32 registers (x0..x31), x0 always zero
+   - 64-entry instruction and data memories
+
+4. Verification Passive:
+   - Monitors observe only, do not drive signals
+   - NO active stimulus (agents are read-only)
+   - Relies on internal DUT operation to generate test activity
+
+
+13. DEBUGGING TIPS
+================================================================================
+
+1. Signal Synchronization Issues:
+   - If falsely failing ALU/controller checks:
+   - Verify transaction carries all needed decode fields (opcode, funct3, etc.)
+   - Use transaction-local state, not global variables
+
+2. Monitor Connection Issues:
+   - If no UVM_INFO from a monitor:
+   - Check monitor instantiated in build_phase (not just declared)
+   - Verify analysis port connected in connect_phase
+   - Confirm virtual interface passed via config_db
+
+3. Memory Verification Issues:
+   - If all reads show mismatch:
+   - Check memory file loaded correctly ($readmemh)
+   - Verify address indexing ([7:2] for 64 entries)
+   - Check memory updated on writes in mirror
+
+4. Coverage Issues:
+   - If coverage shows zero for some bins:
+   - Program may not exercise all instruction types
+   - Check sentinel instruction is reachable
+   - Verify test sequence is correct
+
+5. Temporal Issues:
+   - If PC, ALU, and register transactions arrive at different times:
+   - This is normal in combinational systems
+   - Use transaction-contained state (not global decode_instr results)
+   - Sentinel ensures all cycles complete before test ends
+
+
+14. EXTENDING THE TESTBENCH
+================================================================================
+
+To add new features:
+
+A. New Monitor Type:
+   1. Extend uvm_monitor
+   2. Create corresponding seq_item class
+   3. Instantiate in my_env.build_phase()
+   4. Add analysis port connection in my_env.connect_phase()
+   5. Add write_* function in scoreboard
+
+B. Enhanced Verification:
+   1. Add golden model function in scoreboard
+   2. Compare transaction data against model output
+   3. Print errors via `uvm_error()
+
+C. Sequence/Stimulus Generation:
+   1. Extend uvm_sequence
+   2. Use sequencer (if agents had active drivers)
+   3. Generate transactions to apply to DUT
+   4. Current testbench is passive-only (for observation)
+
+================================================================================
+END OF ARCHITECTURE DOCUMENTATION
+================================================================================

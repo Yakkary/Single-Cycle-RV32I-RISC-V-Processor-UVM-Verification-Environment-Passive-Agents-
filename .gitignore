@@ -1,0 +1,22 @@
+# Questa/ModelSim generated libraries and temp data
+work/
+transcript
+vsim.wlf
+vsim_stacktrace.vstf
+mywaves
+*.wlf
+*.vstf
+*.qdb
+*.qpg
+*.qtl
+*_lock
+
+# Local wave/debug scripts outputs
+*.log
+*.jou
+*.tmp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
