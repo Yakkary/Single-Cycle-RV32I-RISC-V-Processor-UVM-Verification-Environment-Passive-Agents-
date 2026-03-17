@@ -3,6 +3,10 @@ work/
 transcript
 vsim.wlf
 vsim_stacktrace.vstf
+modelsim.ini
+*.ucdb
+*.vcd
+*.vpd
 mywaves
 *.wlf
 *.vstf
